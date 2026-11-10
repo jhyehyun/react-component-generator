@@ -15,7 +15,7 @@ describe('App 상태 영속화', () => {
       vi.fn(async (url: string) =>
         url === '/api/config'
           ? new Response(JSON.stringify({ envKeys: { anthropic: false, google: false } }))
-          : new Response(JSON.stringify({ code: CODE })),
+          : new Response(`${JSON.stringify({ type: 'done', code: CODE })}\n`),
       ),
     );
   });
