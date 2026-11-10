@@ -31,6 +31,116 @@ const mockControlledStream = () => {
   };
 };
 
+// 호출마다 별도 스트림을 만들고, 요청이 abort되면 스트림을 AbortError로 끝낸다.
+const mockAbortableStreams = () => {
+  const encoder = new TextEncoder();
+  const calls: Array<{
+    signal: AbortSignal | null | undefined;
+    send: (events: object[]) => void;
+    close: () => void;
+  }> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+        },
+      });
+      init?.signal?.addEventListener('abort', () => {
+        try {
+          controller.error(new DOMException('aborted', 'AbortError'));
+        } catch {
+          // 이미 닫힌 스트림
+        }
+      });
+      calls.push({
+        signal: init?.signal,
+        send: (events) => controller.enqueue(encoder.encode(ndjson(events))),
+        close: () => controller.close(),
+      });
+      return new Response(body, { status: 200 });
+    }),
+  );
+  return calls;
+};
+
+describe('useComponentGenerator 요청 취소·경합', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('요청에 AbortSignal을 전달한다', async () => {
+    const calls = mockAbortableStreams();
+    const { result } = renderHook(() => useComponentGenerator());
+
+    act(() => {
+      void result.current.generate('카드', undefined, 'google');
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+
+    expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('새 generate를 시작하면 진행 중이던 이전 요청을 abort한다', async () => {
+    const calls = mockAbortableStreams();
+    const { result } = renderHook(() => useComponentGenerator());
+
+    act(() => {
+      void result.current.generate('A', undefined, 'google');
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    act(() => {
+      void result.current.generate('B', undefined, 'google');
+    });
+
+    expect(calls[0].signal?.aborted).toBe(true);
+  });
+
+  it('언마운트하면 진행 중인 요청을 abort한다', async () => {
+    const calls = mockAbortableStreams();
+    const { result, unmount } = renderHook(() => useComponentGenerator());
+
+    act(() => {
+      void result.current.generate('카드', undefined, 'google');
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    unmount();
+
+    expect(calls[0].signal?.aborted).toBe(true);
+  });
+
+  it('이전 요청이 abort로 끝나도 에러를 표시하지 않고 새 요청의 streaming 상태를 지우지 않는다', async () => {
+    const calls = mockAbortableStreams();
+    const { result } = renderHook(() => useComponentGenerator());
+
+    act(() => {
+      void result.current.generate('A', undefined, 'google');
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    act(() => {
+      void result.current.generate('B', undefined, 'google');
+    });
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => calls[1].send([{ type: 'delta', text: 'b' }]));
+
+    await vi.waitFor(() =>
+      expect(result.current.streaming).toMatchObject({ prompt: 'B', code: 'b' }),
+    );
+    expect(result.current.error).toBeNull();
+    expect(result.current.isLoading).toBe(true);
+
+    await act(async () => {
+      calls[1].send([{ type: 'done', code: 'final-b' }]);
+      calls[1].close();
+    });
+    await vi.waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.components).toHaveLength(1);
+    expect(result.current.components[0]).toMatchObject({ prompt: 'B', code: 'final-b' });
+  });
+});
+
 describe('useComponentGenerator 스트리밍', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

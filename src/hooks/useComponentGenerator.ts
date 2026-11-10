@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { GeneratedComponent, Provider, StreamEvent, StreamingComponent } from '../types';
 import { usePersistedState } from './usePersistedState';
 import { STORAGE_KEYS } from '../utils/storage';
@@ -29,18 +29,28 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
   const [streaming, setStreaming] = useState<StreamingComponent | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeRef = useRef<{ id: string; controller: AbortController } | null>(null);
+
+  // 언마운트되면 진행 중인 요청을 끊어 서버가 업스트림 호출을 멈추게 한다.
+  useEffect(() => () => activeRef.current?.controller.abort(), []);
 
   const generate = useCallback(async (prompt: string, apiKey: string | undefined, provider: Provider) => {
+    // 진행 중인 요청이 있으면 취소하고 새 요청으로 교체한다.
+    activeRef.current?.controller.abort();
+    const controller = new AbortController();
+
     setIsLoading(true);
     setError(null);
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const createdAt = new Date();
+    activeRef.current = { id, controller };
     setStreaming({ id, prompt, code: '', createdAt });
 
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, ...(apiKey && { apiKey }), provider }),
       });
@@ -53,7 +63,7 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
       let finalCode: string | null = null;
       for await (const event of readNdjson<StreamEvent>(res.body!)) {
         if (event.type === 'delta') {
-          setStreaming((prev) => prev && { ...prev, code: prev.code + event.text });
+          setStreaming((prev) => (prev?.id === id ? { ...prev, code: prev.code + event.text } : prev));
         } else if (event.type === 'error') {
           throw new Error(event.message);
         } else if (event.type === 'done') {
@@ -71,11 +81,18 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
 
       setComponents((prev) => [{ id, prompt, code: finalCode, createdAt }, ...prev]);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      setError(message);
+      // 새 요청이나 언마운트로 취소된 요청의 에러는 사용자에게 보이지 않는다.
+      if (!controller.signal.aborted) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        setError(message);
+      }
     } finally {
-      setStreaming(null);
-      setIsLoading(false);
+      // 이후 요청이 이미 상태를 넘겨받았다면 건드리지 않는다.
+      if (activeRef.current?.id === id) {
+        activeRef.current = null;
+        setStreaming(null);
+        setIsLoading(false);
+      }
     }
   }, [setComponents]);
 

@@ -5,6 +5,10 @@ import {
   createSSEParser,
   extractAnthropicDelta,
   extractGeminiDelta,
+  toClientError,
+  parseGenerateRequest,
+  UpstreamError,
+  UserFacingError,
 } from './generator';
 
 describe('stripCodeFences', () => {
@@ -98,5 +102,105 @@ describe('extractGeminiDelta', () => {
   it('finishReason이 MAX_TOKENS이면 잘림으로 표시한다', () => {
     const payload = JSON.stringify({ candidates: [{ content: { parts: [{ text: 'x' }] }, finishReason: 'MAX_TOKENS' }] });
     expect(extractGeminiDelta(payload)).toEqual({ text: 'x', truncated: true });
+  });
+});
+
+describe('toClientError', () => {
+  it('status 503인 업스트림 에러는 과부하 안내와 503으로 매핑한다', () => {
+    const result = toClientError(new UpstreamError('Gemini API error: 503', 503));
+    expect(result).toEqual({
+      status: 503,
+      message: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.',
+    });
+  });
+
+  it('status 429인 업스트림 에러는 요청 과다 안내와 429로 매핑한다', () => {
+    const result = toClientError(new UpstreamError('Claude API error: 429', 429));
+    expect(result).toEqual({ status: 429, message: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' });
+  });
+
+  it('그 외 status의 업스트림 에러는 메시지를 그대로 500으로 반환한다', () => {
+    const result = toClientError(new UpstreamError('Claude API error: 400', 400));
+    expect(result).toEqual({ status: 500, message: 'Claude API error: 400' });
+  });
+
+  it('메시지에 503 숫자가 섞여 있어도 일반 Error는 503으로 오인하지 않는다', () => {
+    const result = toClientError(new Error('Claude API error: 5030'));
+    expect(result.status).toBe(500);
+  });
+
+  it('사용자에게 보여도 되는 UserFacingError는 메시지를 그대로 전달한다', () => {
+    const result = toClientError(new UserFacingError('생성된 코드가 비어 있습니다.'));
+    expect(result).toEqual({ status: 500, message: '생성된 코드가 비어 있습니다.' });
+  });
+
+  it('SyntaxError 같은 예기치 않은 예외는 원문을 숨기고 고정 문구를 반환한다', () => {
+    const result = toClientError(new SyntaxError('JSON Parse error: Unexpected EOF'));
+    expect(result.status).toBe(500);
+    expect(result.message).not.toContain('JSON Parse');
+  });
+
+  it('스트림 중간에 온 Anthropic overloaded_error는 503으로 매핑된다', () => {
+    const payload = JSON.stringify({ type: 'error', error: { type: 'overloaded_error' } });
+    let caught: unknown;
+    try {
+      extractAnthropicDelta(payload);
+    } catch (err) {
+      caught = err;
+    }
+    expect(toClientError(caught).status).toBe(503);
+  });
+
+  it('스트림 중간에 온 Gemini 429 에러는 429로 매핑된다', () => {
+    const payload = JSON.stringify({ error: { code: 429 } });
+    let caught: unknown;
+    try {
+      extractGeminiDelta(payload);
+    } catch (err) {
+      caught = err;
+    }
+    expect(toClientError(caught).status).toBe(429);
+  });
+});
+
+describe('parseGenerateRequest', () => {
+  it('유효한 요청이면 prompt를 trim하고 provider 기본값을 anthropic으로 채운다', () => {
+    expect(parseGenerateRequest({ prompt: '  카드  ' })).toEqual({
+      ok: true,
+      prompt: '카드',
+      provider: 'anthropic',
+      apiKey: undefined,
+    });
+  });
+
+  it('provider와 apiKey를 그대로 전달한다', () => {
+    expect(parseGenerateRequest({ prompt: 'a', provider: 'google', apiKey: 'k' })).toMatchObject({
+      ok: true,
+      provider: 'google',
+      apiKey: 'k',
+    });
+  });
+
+  it('본문이 객체가 아니면 거부한다', () => {
+    expect(parseGenerateRequest(null)).toMatchObject({ ok: false });
+    expect(parseGenerateRequest('x')).toMatchObject({ ok: false });
+  });
+
+  it('prompt가 문자열이 아니거나 비어 있으면 거부한다', () => {
+    expect(parseGenerateRequest({ prompt: { a: 1 } })).toEqual({ ok: false, error: 'Prompt is required' });
+    expect(parseGenerateRequest({ prompt: '   ' })).toEqual({ ok: false, error: 'Prompt is required' });
+  });
+
+  it('prompt가 500자를 넘으면 거부한다', () => {
+    const result = parseGenerateRequest({ prompt: 'a'.repeat(501) });
+    expect(result).toEqual({ ok: false, error: '프롬프트는 500자 이하로 입력해주세요.' });
+  });
+
+  it('알 수 없는 provider는 거부한다', () => {
+    expect(parseGenerateRequest({ prompt: 'a', provider: 'openai' })).toMatchObject({ ok: false });
+  });
+
+  it('apiKey가 문자열이 아니면 거부한다', () => {
+    expect(parseGenerateRequest({ prompt: 'a', apiKey: 123 })).toMatchObject({ ok: false });
   });
 });

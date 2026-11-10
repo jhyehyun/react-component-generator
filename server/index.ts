@@ -4,6 +4,10 @@ import {
   createSSEParser,
   extractAnthropicDelta,
   extractGeminiDelta,
+  parseGenerateRequest,
+  toClientError,
+  UpstreamError,
+  UserFacingError,
 } from './generator';
 import type { StreamDelta } from './generator';
 import { withModelFallback } from './fallback';
@@ -88,14 +92,19 @@ async function* streamText(
       if (payload === '[DONE]') continue;
       const { text, truncated } = extract(payload);
       if (text) yield text;
-      if (truncated && failOnTruncate) throw new Error(TRUNCATED_MESSAGE);
+      if (truncated && failOnTruncate) throw new UserFacingError(TRUNCATED_MESSAGE);
     }
   }
 }
 
-async function callAnthropic(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+async function callAnthropic(
+  prompt: string,
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<AsyncGenerator<string>> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
@@ -111,18 +120,24 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<AsyncGener
   });
 
   if (!response.ok) {
-    throw new Error(`Claude API error: ${response.status}`);
+    throw new UpstreamError(`Claude API error: ${response.status}`, response.status);
   }
 
   return streamText(response, extractAnthropicDelta, false);
 }
 
 // 폴백은 스트림 연결 단계(응답 수신)까지만 적용된다. 스트리밍이 시작된 뒤의 실패는 그대로 전파한다.
-async function connectGoogleModel(prompt: string, apiKey: string, model: string): Promise<Response> {
+async function connectGoogleModel(
+  prompt: string,
+  apiKey: string,
+  model: string,
+  signal: AbortSignal,
+): Promise<Response> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -132,45 +147,38 @@ async function connectGoogleModel(prompt: string, apiKey: string, model: string)
   });
 
   if (!response.ok) {
-    throw new Error(`Gemini API error: ${response.status}`);
+    throw new UpstreamError(`Gemini API error: ${response.status}`, response.status);
   }
 
   return response;
 }
 
-async function callGoogle(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+async function callGoogle(
+  prompt: string,
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<AsyncGenerator<string>> {
   const response = await withModelFallback(GOOGLE_MODELS, (model) =>
-    connectGoogleModel(prompt, apiKey, model),
+    connectGoogleModel(prompt, apiKey, model, signal),
   );
   return streamText(response, extractGeminiDelta, true);
 }
 
 function errorResponse(err: unknown): Response {
-  const message = err instanceof Error ? err.message : 'Unknown error';
-
-  if (message.includes('503')) {
-    return Response.json(
-      { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
-      { status: 503, headers: CORS_HEADERS }
-    );
-  }
-
-  if (message.includes('429')) {
-    return Response.json(
-      { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
-      { status: 429, headers: CORS_HEADERS }
-    );
-  }
-
-  return Response.json({ error: message }, { status: 500, headers: CORS_HEADERS });
+  const { status, message } = toClientError(err);
+  return Response.json({ error: message }, { status, headers: CORS_HEADERS });
 }
 
 // 클라이언트로 보내는 NDJSON 스트림: {type:'delta',text} → {type:'done',code} | {type:'error',message}
-function ndjsonResponse(source: AsyncGenerator<string>): Response {
+// 클라이언트가 연결을 끊으면(cancel) 업스트림 요청도 함께 중단한다.
+function ndjsonResponse(source: AsyncGenerator<string>, upstream: AbortController): Response {
   const encoder = new TextEncoder();
+  let closed = false;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: object) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      const send = (event: object) => {
+        if (!closed) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
       try {
         let full = '';
         for await (const text of source) {
@@ -178,13 +186,20 @@ function ndjsonResponse(source: AsyncGenerator<string>): Response {
           send({ type: 'delta', text });
         }
         const code = ensureRenderCall(stripCodeFences(full));
-        if (!code) throw new Error('생성된 코드가 비어 있습니다. 다시 시도해주세요.');
+        if (!code) throw new UserFacingError('생성된 코드가 비어 있습니다. 다시 시도해주세요.');
         send({ type: 'done', code });
       } catch (err) {
-        send({ type: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
+        send({ type: 'error', message: toClientError(err).message });
       } finally {
-        controller.close();
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
       }
+    },
+    cancel() {
+      closed = true;
+      upstream.abort();
     },
   });
   return new Response(stream, {
@@ -215,12 +230,17 @@ const server = Bun.serve({
 
     if (req.method === 'POST' && url.pathname === '/api/generate') {
       try {
-        const { prompt, apiKey, provider = 'anthropic' } = (await req.json()) as {
-          prompt: string;
-          apiKey?: string;
-          provider?: Provider;
-        };
+        const raw: unknown = await req.json().catch(() => null);
+        const parsed = parseGenerateRequest(raw);
 
+        if (!parsed.ok) {
+          return Response.json(
+            { error: parsed.error },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        const { prompt, apiKey, provider } = parsed;
         const resolvedKey = resolveApiKey(provider, apiKey);
 
         if (!resolvedKey) {
@@ -230,19 +250,13 @@ const server = Bun.serve({
           );
         }
 
-        if (!prompt) {
-          return Response.json(
-            { error: 'Prompt is required' },
-            { status: 400, headers: CORS_HEADERS }
-          );
-        }
-
+        const upstream = new AbortController();
         const source =
           provider === 'google'
-            ? await callGoogle(prompt, resolvedKey)
-            : await callAnthropic(prompt, resolvedKey);
+            ? await callGoogle(prompt, resolvedKey, upstream.signal)
+            : await callAnthropic(prompt, resolvedKey, upstream.signal);
 
-        return ndjsonResponse(source);
+        return ndjsonResponse(source, upstream);
       } catch (err) {
         return errorResponse(err);
       }
