@@ -17,7 +17,7 @@
 
 - API 키는 클라이언트 번들에 넣지 않는다. 환경 키는 서버만 읽고(`server/index.ts:59-62`), 클라이언트에는 보유 여부 boolean만 노출한다(`server/index.ts:150-153`, `src/App.tsx:25`). 키 값을 `/api/config` 응답에 추가하지 마라.
 - `.env`는 커밋하지 않는다 (`.gitignore`에 등록). 키를 코드·테스트·로그에 하드코딩하지 마라.
-- 사용자가 UI에 입력한 키는 요청 body로만 전달하고 저장하지 않는다 (`src/App.tsx:14`는 메모리 state만 사용). localStorage 등에 영속화하지 마라.
+- 사용자가 UI에 입력한 키는 요청 body로만 서버에 전달한다. 브라우저에는 `localStorage`의 `STORAGE_KEYS.apiKey`에만 저장하며(`src/App.tsx`, `src/utils/storage.ts`), 사용자가 요청한 동작이다. 쿼리스트링·로그·서버 저장·다른 저장소로 확장하지 마라. 저장 키는 `rcg:` 접두사를 유지한다.
 
 ### Hard Constraint
 
@@ -34,8 +34,8 @@
 
 ### Test Boundary
 
-- 테스트가 있는 곳: `server/generator.ts`, `server/fallback.ts`, `src/components/PromptInput.tsx`. 순수 함수는 `server/index.ts`(부수효과: `Bun.serve`)에 두지 말고 `generator.ts`/`fallback.ts`로 분리해 테스트한다 (`server/generator.ts:1-2` 주석).
-- 테스트 없는 곳: `server/index.ts`의 HTTP 핸들러, `src/hooks/useComponentGenerator.ts`, `LivePreview`. 이 영역을 수정하면 수동 확인(`bun run dev`)이 필요하다.
+- 테스트가 있는 곳: `server/generator.ts`, `server/fallback.ts`, `src/components/PromptInput.tsx`, `src/App.tsx`, `src/hooks/`, `src/utils/`. 순수 함수는 `server/index.ts`(부수효과: `Bun.serve`)에 두지 말고 `generator.ts`/`fallback.ts`로 분리해 테스트한다 (`server/generator.ts:1-2` 주석).
+- 테스트 없는 곳: `server/index.ts`의 HTTP 핸들러, `LivePreview`. 이 영역을 수정하면 수동 확인(`bun run dev`)이 필요하다.
 - 테스트 파일은 소스 옆에 `*.test.ts(x)`로 둔다 (`vite.config.ts` include 패턴: `src/**`, `server/**`).
 
 ## Project Context

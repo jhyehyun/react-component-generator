@@ -1,5 +1,13 @@
 import { useState, useCallback } from 'react';
 import type { GeneratedComponent, Provider } from '../types';
+import { usePersistedState } from './usePersistedState';
+import { STORAGE_KEYS } from '../utils/storage';
+
+// 저장된 JSON에서 createdAt을 Date로 되돌린다. 배열이 아니면 예외를 던져 fallback을 쓰게 한다.
+function reviveComponents(raw: unknown): GeneratedComponent[] {
+  if (!Array.isArray(raw)) throw new Error('invalid components');
+  return raw.map((item) => ({ ...item, createdAt: new Date(item.createdAt) }));
+}
 
 interface UseComponentGeneratorReturn {
   components: GeneratedComponent[];
@@ -11,7 +19,11 @@ interface UseComponentGeneratorReturn {
 }
 
 export function useComponentGenerator(): UseComponentGeneratorReturn {
-  const [components, setComponents] = useState<GeneratedComponent[]>([]);
+  const [components, setComponents] = usePersistedState<GeneratedComponent[]>(
+    STORAGE_KEYS.components,
+    [],
+    reviveComponents,
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,15 +58,15 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [setComponents]);
 
   const removeComponent = useCallback((id: string) => {
     setComponents((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+  }, [setComponents]);
 
   const clearAll = useCallback(() => {
     setComponents([]);
-  }, []);
+  }, [setComponents]);
 
   return { components, isLoading, error, generate, removeComponent, clearAll };
 }

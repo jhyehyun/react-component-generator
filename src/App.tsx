@@ -1,4 +1,7 @@
 import { useState, useEffect } from 'react';
+import { usePersistedState } from './hooks/usePersistedState';
+import { STORAGE_KEYS } from './utils/storage';
+import { addToHistory } from './utils/promptHistory';
 import { PromptInput } from './components/PromptInput';
 import { ComponentCard } from './components/ComponentCard';
 import { useComponentGenerator } from './hooks/useComponentGenerator';
@@ -10,10 +13,26 @@ const PROVIDER_CONFIG = {
   google: { label: 'Google', placeholder: 'AIza...' },
 } as const;
 
+// 저장된 값이 유효하지 않으면 예외를 던져 loadStored가 기본값을 쓰게 한다.
+function reviveProvider(raw: unknown): Provider {
+  if (typeof raw === 'string' && raw in PROVIDER_CONFIG) return raw as Provider;
+  throw new Error('invalid provider');
+}
+
+function reviveHistory(raw: unknown): string[] {
+  if (Array.isArray(raw) && raw.every((item) => typeof item === 'string')) return raw;
+  throw new Error('invalid history');
+}
+
 function App() {
-  const [apiKey, setApiKey] = useState('');
+  const [apiKey, setApiKey] = usePersistedState(STORAGE_KEYS.apiKey, '');
   const [showKey, setShowKey] = useState(false);
-  const [provider, setProvider] = useState<Provider>('google');
+  const [provider, setProvider] = usePersistedState<Provider>(
+    STORAGE_KEYS.provider,
+    'google',
+    reviveProvider,
+  );
+  const [history, setHistory] = usePersistedState<string[]>(STORAGE_KEYS.history, [], reviveHistory);
   const [envKeys, setEnvKeys] = useState<Record<Provider, boolean>>({
     anthropic: false,
     google: false,
@@ -35,6 +54,7 @@ function App() {
       alert(`${PROVIDER_CONFIG[provider].label} API 키를 입력하거나 .env에 설정해주세요.`);
       return;
     }
+    setHistory((prev) => addToHistory(prev, prompt));
     generate(prompt, apiKey || undefined, provider);
   };
 
@@ -70,7 +90,7 @@ function App() {
             <span className="win-title-text">새 컴포넌트</span>
           </div>
           <div className="win-body">
-            <PromptInput onGenerate={handleGenerate} isLoading={isLoading} />
+            <PromptInput onGenerate={handleGenerate} isLoading={isLoading} history={history} />
           </div>
         </section>
 

@@ -25,13 +25,16 @@ Vite + React 19 프론트엔드. 서버와는 `/api/generate`, `/api/config`로�
 - 실행: `bunx vitest run src`
 - 패턴: Testing Library + `userEvent`, 접근성 role/name으로 요소를 찾는다(`getByRole('button', { name })`, `PromptInput.test.tsx`). 케이스명은 한국어.
 - 정리(cleanup)는 `src/test/setup.ts`가 처리하므로 테스트에서 중복 호출하지 마라.
-- 현재 테스트는 `PromptInput`뿐이다. `App`, `ComponentCard`, `useComponentGenerator`를 수정하면 `bun run dev`로 수동 확인한다.
+- 테스트가 없는 `ComponentCard`, `CodeView`, `LivePreview`를 수정하면 `bun run dev`로 수동 확인한다.
+- `src/test/setup.ts`가 테스트마다 `localStorage.clear()`를 하므로, 영속화 테스트는 `STORAGE_KEYS`로 직접 값을 심어 복원을 검증한다.
 
 ## Local Golden Rules
 
 - Do: 미리보기 새로고침은 `LivePreview`의 `key`를 바꿔 리마운트하는 방식이다 (`ComponentCard.tsx:289,346`). 상태 초기화가 필요한 미리보기 변경도 이 방식을 유지한다.
 - Do: 생성·재생성은 반드시 `App`의 `handleGenerate`를 거친다 (`App.tsx:33-39`, `:185`에서 `onRegenerate`로 전달). 여기서 API 키/환경 키 유무를 검사하므로, 훅의 `generate`를 컴포넌트에서 직접 호출해 우회하지 마라.
 - Do: Provider 변경 시 입력된 키를 비운다 (`App.tsx:41-44`). 프로바이더 간 키가 섞여 전송되는 것을 막는 동작이므로 유지한다.
-- Don't: `apiKey`를 localStorage·쿼리스트링·로그에 남기지 마라 (`App.tsx:14`는 메모리 state).
+- Don't: `apiKey`를 쿼리스트링·로그에 남기지 마라. 브라우저 저장은 `usePersistedState(STORAGE_KEYS.apiKey)` 한 곳에서만 한다.
+- Do: 새 영속 상태는 `STORAGE_KEYS`에 키를 추가하고 `usePersistedState`를 쓴다. localStorage를 컴포넌트에서 직접 읽고 쓰지 마라. 저장 데이터는 신뢰하지 말고 `revive`로 검증하며(`App.tsx`의 `reviveProvider`, `reviveHistory`), 잘못된 값이면 예외를 던져 기본값으로 돌린다.
+- Do: 저장된 `GeneratedComponent.createdAt`은 JSON에서 문자열이 되므로 복원 시 `Date`로 되돌린다 (`useComponentGenerator.ts`의 `reviveComponents`).
 - Don't: `Provider` 타입을 바꿀 때 `types/index.ts:1`만 수정하지 마라. 같은 유니온이 `server/index.ts:57`에 별도로 정의돼 있어 두 곳을 함께 수정해야 하고, `App.tsx:8-11`의 `PROVIDER_CONFIG`도 맞춰야 한다.
 - Don't: `LivePreview`에 `noInline`을 제거하지 마라 (`LivePreview.tsx:11`). 서버가 생성하는 `render()` 호출 방식과 짝이다.
