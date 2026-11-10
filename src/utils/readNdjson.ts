@@ -18,6 +18,8 @@ export async function* readNdjson<T = unknown>(body: ReadableStream<Uint8Array>)
     buffer += decoder.decode();
     if (buffer.trim()) yield JSON.parse(buffer) as T;
   } finally {
+    // 소비자가 중간에 멈추거나 파싱이 실패해도 본문 스트림을 닫는다.
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
