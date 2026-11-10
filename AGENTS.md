@@ -19,6 +19,8 @@
 - `.env`는 커밋하지 않는다 (`.gitignore`에 등록). 키를 코드·테스트·로그에 하드코딩하지 마라.
 - 사용자가 UI에 입력한 키는 요청 body로만 서버에 전달한다. 브라우저에는 `localStorage`의 `STORAGE_KEYS.apiKey`에만 저장하며(`src/App.tsx`, `src/utils/storage.ts`), 사용자가 요청한 동작이다. 쿼리스트링·로그·서버 저장·다른 저장소로 확장하지 마라. 저장 키는 `rcg:` 접두사를 유지한다.
 
+- 민감 파일(`.env`, `.env.*`, 이름에 `credential`/`secret`이 들어간 파일, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `~/.ssh`, `~/.aws`, `~/.config/gcloud`)은 읽기·수정·삭제를 하지 마라. `.claude/settings.json`의 `permissions.deny`가 같은 규칙을 강제하며, 두 곳은 항상 함께 갱신한다. 우회(셸 변수·경로 조합 등)도 금지다.
+
 ### Hard Constraint
 
 - 미리보기는 `react-live`의 `noInline` 모드다 (`src/components/LivePreview.tsx:11`). 생성 코드 마지막에 `render(<Component />)` 호출이 있어야 그려지며, import 문과 TypeScript 문법은 쓸 수 없다. 이 규칙은 `server/index.ts:11,12,20`의 SYSTEM_PROMPT와 짝이므로 한쪽만 바꾸지 마라.
