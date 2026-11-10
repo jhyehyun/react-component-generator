@@ -37,8 +37,10 @@ function App() {
     anthropic: false,
     google: false,
   });
-  const { components, isLoading, error, generate, removeComponent, clearAll } =
+  const { components, streaming, isLoading, error, generate, removeComponent, clearAll } =
     useComponentGenerator();
+  // 생성 중인 카드를 맨 앞에 두고, 완료돼 같은 id로 확정되면 카드가 리마운트되지 않고 그대로 이어진다.
+  const cards = streaming ? [streaming, ...components.filter((c) => c.id !== streaming.id)] : components;
 
   useEffect(() => {
     fetch('/api/config')
@@ -182,28 +184,15 @@ function App() {
           </div>
         )}
 
-        {isLoading && (
-          <div className="win loading-card" role="status">
-            <div className="win-title">
-              <span className="win-title-text">생성 중</span>
-            </div>
-            <div className="win-body">
-              <p>컴포넌트를 만들고 있습니다. 잠시만 기다려주세요.</p>
-              <div className="progress" aria-hidden="true">
-                <div className="progress-fill" />
-              </div>
-            </div>
-          </div>
-        )}
-
         <div className="results-grid">
-          {components.map((component) => (
+          {cards.map((component) => (
             <ComponentCard
               key={component.id}
               component={component}
               onRemove={removeComponent}
               onRegenerate={handleGenerate}
               isLoading={isLoading}
+              isStreaming={component.id === streaming?.id}
             />
           ))}
         </div>

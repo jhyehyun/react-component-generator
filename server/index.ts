@@ -1,4 +1,11 @@
-import { stripCodeFences, ensureRenderCall } from './generator';
+import {
+  stripCodeFences,
+  ensureRenderCall,
+  createSSEParser,
+  extractAnthropicDelta,
+  extractGeminiDelta,
+} from './generator';
+import type { StreamDelta } from './generator';
 import { withModelFallback } from './fallback';
 
 // 우선순위 순서. 앞 모델이 실패하면 다음 모델로 폴백한다.
@@ -65,7 +72,28 @@ function resolveApiKey(provider: Provider, clientKey?: string): string | null {
   return clientKey || ENV_KEYS[provider] || null;
 }
 
-async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
+const TRUNCATED_MESSAGE = '생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.';
+
+// 업스트림 SSE 본문을 읽어 텍스트 조각을 차례로 내보낸다.
+// failOnTruncate가 true면 max tokens 잘림을 에러로 던진다 (Gemini 경로만 사용).
+async function* streamText(
+  response: Response,
+  extract: (payload: string) => StreamDelta,
+  failOnTruncate: boolean,
+): AsyncGenerator<string> {
+  const parse = createSSEParser();
+  const decoder = new TextDecoder();
+  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+    for (const payload of parse(decoder.decode(chunk, { stream: true }))) {
+      if (payload === '[DONE]') continue;
+      const { text, truncated } = extract(payload);
+      if (text) yield text;
+      if (truncated && failOnTruncate) throw new Error(TRUNCATED_MESSAGE);
+    }
+  }
+}
+
+async function callAnthropic(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -76,6 +104,7 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
+      stream: true,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -85,18 +114,12 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
     throw new Error(`Claude API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    content: Array<{ type: string; text?: string }>;
-  };
-
-  return data.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
+  return streamText(response, extractAnthropicDelta, false);
 }
 
-async function callGoogleModel(prompt: string, apiKey: string, model: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+// 폴백은 스트림 연결 단계(응답 수신)까지만 적용된다. 스트리밍이 시작된 뒤의 실패는 그대로 전파한다.
+async function connectGoogleModel(prompt: string, apiKey: string, model: string): Promise<Response> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -112,27 +135,61 @@ async function callGoogleModel(prompt: string, apiKey: string, model: string): P
     throw new Error(`Gemini API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    candidates: Array<{
-      content: { parts: Array<{ text?: string }> };
-      finishReason?: string;
-    }>;
-  };
-
-  const candidate = data.candidates?.[0];
-  if (candidate?.finishReason === 'MAX_TOKENS') {
-    throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
-  }
-
-  return (
-    candidate?.content?.parts
-      ?.map((part) => part.text)
-      ?.join('') ?? ''
-  );
+  return response;
 }
 
-async function callGoogle(prompt: string, apiKey: string): Promise<string> {
-  return withModelFallback(GOOGLE_MODELS, (model) => callGoogleModel(prompt, apiKey, model));
+async function callGoogle(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+  const response = await withModelFallback(GOOGLE_MODELS, (model) =>
+    connectGoogleModel(prompt, apiKey, model),
+  );
+  return streamText(response, extractGeminiDelta, true);
+}
+
+function errorResponse(err: unknown): Response {
+  const message = err instanceof Error ? err.message : 'Unknown error';
+
+  if (message.includes('503')) {
+    return Response.json(
+      { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
+      { status: 503, headers: CORS_HEADERS }
+    );
+  }
+
+  if (message.includes('429')) {
+    return Response.json(
+      { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+      { status: 429, headers: CORS_HEADERS }
+    );
+  }
+
+  return Response.json({ error: message }, { status: 500, headers: CORS_HEADERS });
+}
+
+// 클라이언트로 보내는 NDJSON 스트림: {type:'delta',text} → {type:'done',code} | {type:'error',message}
+function ndjsonResponse(source: AsyncGenerator<string>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: object) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      try {
+        let full = '';
+        for await (const text of source) {
+          full += text;
+          send({ type: 'delta', text });
+        }
+        const code = ensureRenderCall(stripCodeFences(full));
+        if (!code) throw new Error('생성된 코드가 비어 있습니다. 다시 시도해주세요.');
+        send({ type: 'done', code });
+      } catch (err) {
+        send({ type: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: { ...CORS_HEADERS, 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+  });
 }
 
 const server = Bun.serve({
@@ -180,35 +237,14 @@ const server = Bun.serve({
           );
         }
 
-        const text =
+        const source =
           provider === 'google'
             ? await callGoogle(prompt, resolvedKey)
             : await callAnthropic(prompt, resolvedKey);
 
-        const code = ensureRenderCall(stripCodeFences(text));
-
-        return Response.json({ code }, { headers: CORS_HEADERS });
+        return ndjsonResponse(source);
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
-
-        if (message.includes('503')) {
-          return Response.json(
-            { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
-            { status: 503, headers: CORS_HEADERS }
-          );
-        }
-
-        if (message.includes('429')) {
-          return Response.json(
-            { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
-            { status: 429, headers: CORS_HEADERS }
-          );
-        }
-
-        return Response.json(
-          { error: message },
-          { status: 500, headers: CORS_HEADERS }
-        );
+        return errorResponse(err);
       }
     }
 

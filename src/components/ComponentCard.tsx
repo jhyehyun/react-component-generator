@@ -8,12 +8,25 @@ interface ComponentCardProps {
   onRemove: (id: string) => void;
   onRegenerate: (prompt: string) => void;
   isLoading: boolean;
+  isStreaming?: boolean;
 }
 
 type Tab = 'preview' | 'code';
 
-export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: ComponentCardProps) {
-  const [activeTab, setActiveTab] = useState<Tab>('preview');
+export function ComponentCard({
+  component,
+  onRemove,
+  onRegenerate,
+  isLoading,
+  isStreaming = false,
+}: ComponentCardProps) {
+  // 스트리밍 중에는 코드 탭에서 생성 과정을 보여주고, 완료되는 순간 미리보기로 전환한다.
+  const [activeTab, setActiveTab] = useState<Tab>(isStreaming ? 'code' : 'preview');
+  const [wasStreaming, setWasStreaming] = useState(isStreaming);
+  if (wasStreaming !== isStreaming) {
+    setWasStreaming(isStreaming);
+    setActiveTab(isStreaming ? 'code' : 'preview');
+  }
   const [previewKey, setPreviewKey] = useState(0);
   const createdAt = component.createdAt.toLocaleTimeString('ko-KR', {
     hour: '2-digit',
@@ -26,6 +39,7 @@ export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: 
         <button
           className="close-box"
           onClick={() => onRemove(component.id)}
+          disabled={isStreaming}
           title="삭제"
           aria-label="삭제"
         />
@@ -39,6 +53,7 @@ export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: 
             aria-selected={activeTab === 'preview'}
             className={`tab ${activeTab === 'preview' ? 'tab--active' : ''}`}
             onClick={() => setActiveTab('preview')}
+            disabled={isStreaming}
           >
             미리보기
           </button>
@@ -57,6 +72,7 @@ export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: 
             onClick={() => setPreviewKey((k) => k + 1)}
             title="미리보기 새로고침"
             aria-label="미리보기 새로고침"
+            disabled={isStreaming}
           >
             ↻
           </button>
@@ -65,7 +81,7 @@ export function ComponentCard({ component, onRemove, onRegenerate, isLoading }: 
             onClick={() => onRegenerate(component.prompt)}
             disabled={isLoading}
           >
-            {isLoading ? '생성 중...' : '재생성'}
+            {isStreaming ? '생성 중...' : '재생성'}
           </button>
         </div>
       </div>
