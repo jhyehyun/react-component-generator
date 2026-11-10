@@ -1,0 +1,39 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+  --desk: #2b7a78;
+  --desk-dither: #246866;
+  --ink: #16163a;
+}
+
+body {
+  min-height: 100vh;
+  background-color: var(--desk);
+  /* 2px 체커 디더링으로 90년대 바탕화면 질감 */
+  background-image:
+    linear-gradient(45deg, var(--desk-dither) 25%, transparent 25%, transparent 75%, var(--desk-dither) 75%),
+    linear-gradient(45deg, var(--desk-dither) 25%, transparent 25%, transparent 75%, var(--desk-dither) 75%);
+  background-size: 4px 4px;
+  background-position: 0 0, 2px 2px;
+  color: var(--ink);
+  font-family: 'Galmuri14', 'Malgun Gothic', 'Apple SD Gothic Neo', ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
