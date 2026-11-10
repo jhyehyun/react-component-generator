@@ -15,7 +15,7 @@
 
 ### Immutable
 
-- API 키는 클라이언트 번들에 넣지 않는다. 환경 키는 서버만 읽고(`server/index.ts:59-62`), 클라이언트에는 보유 여부 boolean만 노출한다(`server/index.ts:150-153`, `src/App.tsx:25`). 키 값을 `/api/config` 응답에 추가하지 마라.
+- API 키는 클라이언트 번들에 넣지 않는다. 환경 키는 서버만 읽고(`server/index.ts:70-73`), 클라이언트에는 보유 여부 boolean만 노출한다(`server/index.ts:222-225`, `src/App.tsx:46`). 키 값을 `/api/config` 응답에 추가하지 마라.
 - `.env`는 커밋하지 않는다 (`.gitignore`에 등록). 키를 코드·테스트·로그에 하드코딩하지 마라.
 - 사용자가 UI에 입력한 키는 요청 body로만 서버에 전달한다. 브라우저에는 `localStorage`의 `STORAGE_KEYS.apiKey`에만 저장하며(`src/App.tsx`, `src/utils/storage.ts`), 사용자가 요청한 동작이다. 쿼리스트링·로그·서버 저장·다른 저장소로 확장하지 마라. 저장 키는 `rcg:` 접두사를 유지한다.
 
@@ -23,16 +23,17 @@
 
 ### Hard Constraint
 
-- 미리보기는 `react-live`의 `noInline` 모드다 (`src/components/LivePreview.tsx:11`). 생성 코드 마지막에 `render(<Component />)` 호출이 있어야 그려지며, import 문과 TypeScript 문법은 쓸 수 없다. 이 규칙은 `server/index.ts:11,12,20`의 SYSTEM_PROMPT와 짝이므로 한쪽만 바꾸지 마라.
-- React는 생성 코드의 전역 스코프에서 제공된다. 프롬프트 예시는 `React.useState` 형태를 쓴다 (`server/index.ts:24`).
+- 미리보기는 `react-live`의 `noInline` 모드다 (`src/components/LivePreview.tsx:11`). 생성 코드 마지막에 `render(<Component />)` 호출이 있어야 그려지며, import 문과 TypeScript 문법은 쓸 수 없다. 이 규칙은 `server/index.ts:22,23,31`의 SYSTEM_PROMPT와 짝이므로 한쪽만 바꾸지 마라.
+- React는 생성 코드의 전역 스코프에서 제공된다. 프롬프트 예시는 `React.useState` 형태를 쓴다 (`server/index.ts:35`).
+- `/api/generate`는 NDJSON 스트림(`delta`/`done`/`error`)으로 응답한다. 서버의 `ndjsonResponse`(`server/index.ts`)와 클라이언트 `StreamEvent`(`src/types/index.ts`)는 짝이므로 이벤트 형식을 한쪽만 바꾸지 마라.
 
 ### Double Defense
 
-- `render()` 호출 보장은 프롬프트 지시(`server/index.ts:12`)와 후처리 `ensureRenderCall`(`server/generator.ts:238`) 두 곳에서 한다. 코드펜스 제거도 프롬프트(`:16`)와 `stripCodeFences`(`server/generator.ts:227`)로 이중 방어한다. 한쪽을 제거하지 마라.
+- `render()` 호출 보장은 프롬프트 지시(`server/index.ts:12`)와 후처리 `ensureRenderCall`(`server/generator.ts:138`) 두 곳에서 한다. 코드펜스 제거도 프롬프트(`server/index.ts:27`)와 `stripCodeFences`(`server/generator.ts:5`)로 이중 방어한다. 후처리는 스트림 종료 시 `ndjsonResponse`의 `done` 이벤트에서 한 번만 적용된다(`delta`에는 적용되지 않음). 한쪽을 제거하지 마라.
 
 ### Asymmetry
 
-- Gemini 경로에만 모델 폴백(`withModelFallback`, `server/index.ts:134-136`)과 `MAX_TOKENS` 잘림 검사(`server/index.ts:123`)가 있다. Anthropic 경로(`callAnthropic`)에는 없다. 프로바이더를 추가·수정할 때 이 차이가 의도인지 확인하고, 동일 처리가 필요하면 함께 반영하라.
+- Gemini 경로에만 모델 폴백(`withModelFallback`, `server/index.ts:161-163`, 스트림 연결 단계에만 적용)과 `MAX_TOKENS` 잘림 검사(`streamText`의 `failOnTruncate`, `server/index.ts:95`)가 있다. Anthropic 경로(`callAnthropic`)에는 없다. 프로바이더를 추가·수정할 때 이 차이가 의도인지 확인하고, 동일 처리가 필요하면 함께 반영하라.
 
 ### Test Boundary
 
